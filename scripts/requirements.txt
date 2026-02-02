@@ -1,0 +1,16 @@
+azure-ai-projects
+azure-ai-agents
+
+# azure-ai-projects==2.0.0b3
+# azure-ai-agents==1.2.0b5
+# agent-framework==1.0.0b260123
+
+openai
+azure-search-documents
+azure-identity
+pypdf
+reportlab
+python-dotenv
+pandas
+azure-ai-evaluation
+azure-ai-evaluation[redteam]

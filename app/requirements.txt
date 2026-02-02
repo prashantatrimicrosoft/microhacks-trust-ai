@@ -1,0 +1,17 @@
+# Streamlit Chat Application Dependencies
+streamlit>=1.32.0
+openai>=1.20.0
+azure-identity>=1.15.0
+azure-search-documents>=11.4.0
+
+# FastAPI REST API Dependencies
+fastapi>=0.110.0
+uvicorn[standard]>=0.27.0
+pydantic>=2.0.0
+pydantic-settings>=2.0.0
+
+# OpenTelemetry Tracing Dependencies (Azure Application Insights)
+# Use azure-monitor-opentelemetry for automatic compatible version resolution
+azure-monitor-opentelemetry>=1.6.0
+opentelemetry-instrumentation-fastapi
+opentelemetry-instrumentation-requests

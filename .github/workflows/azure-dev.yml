@@ -1,0 +1,261 @@
+name: Github Actions Evaluation Workflow
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - techconch3
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  evaluate_target_app:
+    runs-on: ubuntu-latest
+    env:
+      AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+      AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+      AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      AZURE_ENV_NAME: ${{ vars.AZURE_ENV_NAME }}
+      AZURE_LOCATION: ${{ vars.AZURE_LOCATION }}
+
+      # Your script uses this as the evaluator deployment name
+      AZURE_CHAT_MODEL: ${{ vars.AZURE_CHAT_MODEL }}
+
+      # (Optional) keep these if your repo uses them elsewhere
+      AZURE_CHAT_MODEL_VERSION: ${{ vars.AZURE_CHAT_MODEL_VERSION }}
+      AZURE_EMBEDDING_MODEL: ${{ vars.AZURE_EMBEDDING_MODEL }}
+
+      # project specific
+      #AZURE_CONTAINER_APP_URL: ${{ vars.AZURE_CONTAINER_APP_URL }}
+      AZURE_RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install azd
+        uses: Azure/setup-azd@v2.2.0
+
+      # This makes DefaultAzureCredential work reliably in GitHub Actions
+      - name: Login to Azure (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ env.AZURE_CLIENT_ID }}
+          tenant-id: ${{ env.AZURE_TENANT_ID }}
+          subscription-id: ${{ env.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Set az account
+        uses: azure/CLI@v2
+        with:
+          inlineScript: |
+            az account set --subscription ${{env.AZURE_SUBSCRIPTION_ID}}
+
+      - name: azd auth login (Federated Credentials)
+        run: |
+          azd auth login `
+            --client-id "$Env:AZURE_CLIENT_ID" `
+            --federated-credential-provider "github" `
+            --tenant-id "$Env:AZURE_TENANT_ID"
+        shell: pwsh
+
+      # 🔑 This is what creates .azure/<env>/.env so your script can load AZURE_CONTAINER_APP_URL, etc.
+      - name: Refresh azd environment variables
+        run: |
+          azd env refresh -e $AZURE_ENV_NAME --no-prompt
+        env:
+          AZD_INITIAL_ENVIRONMENT_CONFIG: ${{ secrets.AZD_INITIAL_ENVIRONMENT_CONFIG }}
+
+     # - name: Export azd env vars to GitHub Actions environment
+     #   shell: bash
+     #   run: |
+     #     set -e
+     #     ENV_FILE=".azure/${AZURE_ENV_NAME}/.env"
+     #     echo "Loading $ENV_FILE"
+     #     test -f "$ENV_FILE"
+     #     grep -v '^\s*#' "$ENV_FILE" | grep -E '^[A-Za-z_][A-Za-z0-9_]*=' >> "$GITHUB_ENV"
+
+      - name: Export azd env vars to GitHub Actions environment (strip quotes)
+        shell: bash
+        run: |
+          set -e
+          ENV_FILE=".azure/${AZURE_ENV_NAME}/.env"
+          echo "Loading $ENV_FILE"
+          test -f "$ENV_FILE"
+
+          while IFS= read -r line; do
+            # skip blank lines and comments
+            [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
+
+            # only KEY=VALUE lines
+            if [[ "$line" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]]; then
+              key="${line%%=*}"
+              val="${line#*=}"
+
+              # trim whitespace
+              val="${val#"${val%%[![:space:]]*}"}"
+              val="${val%"${val##*[![:space:]]}"}"
+
+              # strip surrounding single or double quotes
+              val="${val%\"}"; val="${val#\"}"
+              val="${val%\'}"; val="${val#\'}"
+
+              echo "$key=$val" >> "$GITHUB_ENV"
+            fi
+          done < "$ENV_FILE"
+
+      - name: Normalize AZURE_CONTAINER_APP_URL (strip quotes)
+        shell: bash
+        run: |
+          set -e
+          echo "Before: AZURE_CONTAINER_APP_URL=$AZURE_CONTAINER_APP_URL"
+
+          # Strip any surrounding single/double quotes
+          AZURE_CONTAINER_APP_URL="${AZURE_CONTAINER_APP_URL%\"}"
+          AZURE_CONTAINER_APP_URL="${AZURE_CONTAINER_APP_URL#\"}"
+          AZURE_CONTAINER_APP_URL="${AZURE_CONTAINER_APP_URL%\'}"
+          AZURE_CONTAINER_APP_URL="${AZURE_CONTAINER_APP_URL#\'}"
+
+          echo "After:  AZURE_CONTAINER_APP_URL=$AZURE_CONTAINER_APP_URL"
+          echo "AZURE_CONTAINER_APP_URL=$AZURE_CONTAINER_APP_URL" >> "$GITHUB_ENV"
+
+      - name: Print backend URL
+        run: |
+          python -c "import os; print(os.getenv('AZURE_CONTAINER_APP_URL'))"
+          
+
+      - name: Probe chat endpoint
+        shell: bash
+        run: |
+          curl -sS -o /dev/null -w "/chat=%{http_code}\n" \
+            -X POST "$AZURE_CONTAINER_APP_URL/chat" \
+            -H "Content-Type: application/json" \
+            -d '{"message":"ping","conversation_history":[],"max_tokens":16}' || true
+
+          curl -sS -o /dev/null -w "/api/chat=%{http_code}\n" \
+            -X POST "$AZURE_CONTAINER_APP_URL/api/chat" \
+            -H "Content-Type: application/json" \
+            -d '{"message":"ping","conversation_history":[],"max_tokens":16}' || true
+
+
+      - name: Install evaluation dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r scripts/requirements.txt
+
+      # Optional but recommended: fail fast if backend isn't reachable (avoids hanging on input()).
+      #- name: Check backend is reachable
+      #  run: |
+      #    python -c "import os; print('AZURE_CONTAINER_APP_URL=', os.getenv('AZURE_CONTAINER_APP_URL','<missing>'))"
+      #    test -n "$AZURE_CONTAINER_APP_URL"
+      #    curl -f -sS "$AZURE_CONTAINER_APP_URL/api/health" || curl -f -sS "$AZURE_CONTAINER_APP_URL"
+
+      #- name: Evaluate local RAG flow
+      #  run: |
+      #    python scripts/04_run_evaltarget.py --targeturl=http://127.0.0.1:50505/chat --resultsdir=evals/results/pr${{ github.event.issue.number }}
+
+      - name: Preflight - validate required endpoints include https://
+        shell: bash
+        run: |
+          python - <<'PY'
+          import os, sys
+          keys = ["AZURE_OPENAI_ENDPOINT","AZURE_AI_ENDPOINT","AZURE_AI_PROJECT_ENDPOINT"]
+          for k in keys:
+            v = os.getenv(k, "")
+            print(f"{k}={v!r}")
+          # pick evaluator endpoint the script will use
+          endpoint = os.getenv("AZURE_OPENAI_ENDPOINT") or os.getenv("AZURE_AI_ENDPOINT") or ""
+          if endpoint and not (endpoint.startswith("https://") or endpoint.startswith("http://")):
+            print("\nERROR: Evaluator endpoint is missing protocol. It must start with https://", file=sys.stderr)
+            sys.exit(2)
+          proj = os.getenv("AZURE_AI_PROJECT_ENDPOINT","")
+          if proj and not (proj.startswith("https://") or proj.startswith("http://")):
+            print("\nERROR: AZURE_AI_PROJECT_ENDPOINT is missing protocol. It must start with https://", file=sys.stderr)
+            sys.exit(3)
+          PY
+    
+      - name: Show current Azure identity
+        shell: bash
+        run: |
+          az account show -o table
+          az ad sp show --id "$AZURE_CLIENT_ID" --query "{displayName:displayName, objectId:id, appId:appId}" -o table
+
+      - name: Run evaluation against deployed app
+        run: |
+          # If the script hits input() it will otherwise hang CI.
+          printf "y\n" | python scripts/04_run_evaltarget.py
+
+      - name: Summarize evaluation results (markdown)
+        shell: bash
+        run: |
+          set -e
+          python - <<'PY'
+          import json, statistics, pathlib
+
+          path = pathlib.Path("evals/results/quality/results_target.jsonl")
+          if not path.exists():
+            raise SystemExit(f"Missing results file: {path}")
+
+          rows=[]
+          for line in path.read_text(encoding="utf-8").splitlines():
+            line=line.strip()
+            if line:
+              rows.append(json.loads(line))
+
+          def pick_score(r, key):
+            # defensive: supports a few common shapes
+            if isinstance(r, dict):
+              ev = r.get("evaluations", {})
+              if isinstance(ev, dict) and key in ev:
+                v = ev[key]
+                if isinstance(v, dict): return v.get("score")
+                return v
+              if key in r:
+                v = r[key]
+                if isinstance(v, dict): return v.get("score")
+                return v
+            return None
+
+          def clean(xs):
+            out=[]
+            for x in xs:
+              if isinstance(x, (int,float)):
+                out.append(float(x))
+            return out
+
+          rel = clean([pick_score(r,"relevance") for r in rows])
+          grd = clean([pick_score(r,"groundedness") for r in rows])
+
+          def mean(xs):
+            return round(statistics.mean(xs), 4) if xs else "n/a"
+
+          md = []
+          md.append("## ✅ RAG Evaluation Results (Target App)")
+          md.append("")
+          md.append(f"- Samples: **{len(rows)}**")
+          md.append(f"- Relevance mean: **{mean(rel)}**")
+          md.append(f"- Groundedness mean: **{mean(grd)}**")
+          md.append("")
+          md.append("Artifacts:")
+          md.append("- `evals/results/quality/results_target.jsonl`")
+
+          out = pathlib.Path("evals/results/quality/eval_summary.md")
+          out.parent.mkdir(parents=True, exist_ok=True)
+          out.write_text("\n".join(md), encoding="utf-8")
+          print(out)
+          PY
+
+      - name: Upload evaluation artifacts
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v5
+        with:
+          name: eval_results_target
+          path: |
+            evals/results/quality/results_target.jsonl
+            evals/results/quality/eval_summary.md

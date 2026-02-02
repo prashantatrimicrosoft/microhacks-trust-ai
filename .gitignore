@@ -34,6 +34,16 @@ bld/
 [Ll]og/
 [Ll]ogs/
 
+# Environments
+.env
+.venv
+.evalenv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
 # Build results on 'Bin' directories
 **/[Bb]in/*
 # Uncomment if you have tasks that rely on *.refresh files to move binaries
